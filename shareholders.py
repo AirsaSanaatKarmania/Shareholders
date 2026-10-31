@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""برنامه محاسبه سهامداری - Tkinter (ویندوز)"""
+"""برنامه محاسبه سهامداری - ورودی: نام، تعداد سهام، تعداد وثیقه. بقیه محاسبه می‌شود."""
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import json, os, csv, tempfile, webbrowser, html, datetime
+import json, os, csv, re, tempfile, webbrowser, html, datetime
 
 DATA = os.path.join(os.path.expanduser("~"), "shareholders_data.json")
 FA = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+MODES = ["start", "end", "both"]
+MODE_TXT = ["وثیقه در ابتدای بازه هر نفر", "وثیقه در انتهای بازه هر نفر", "هر دو (گزارش چاپی دو جدول)"]
+TITLES = {"start": "حالت اول: سهام وثیقه در ابتدای بازه", "end": "حالت دوم: سهام وثیقه در انتهای بازه"}
+COLS = [f"c{i}" for i in range(13)]
 
 
 def num(s):
@@ -17,73 +21,135 @@ def fmt(n):
     return f"{int(n):,}"
 
 
-class App(tk.Tk):
-    FIELDS = [("name", "نام سهامدار"), ("nid", "کد ملی"), ("total", "تعداد کل سهام"),
-              ("pledged", "سهام وثیقه"), ("start", "شروع سهم (سریال)"),
-              ("end", "پایان سهم (سریال)"), ("note", "توضیحات")]
+def pct_s(p):
+    return f"{p:.5f}".rstrip("0").rstrip(".").replace(".", "/")
 
+
+def compute(people, start0, mode):
+    tot = sum(p["total"] for p in people)
+    rows, cur = [], start0
+    for p in people:
+        t, pl = p["total"], p["pledged"]
+        fr = t - pl
+        s, e = cur, cur + t - 1
+        cur = e + 1
+        if mode == "start":
+            pr = (s, s + pl - 1) if pl else None
+            fv = (s + pl, e) if fr else None
+        else:
+            fv = (s, s + fr - 1) if fr else None
+            pr = (s + fr, e) if pl else None
+        rows.append(dict(name=p["name"], total=t, pl=pl, fr=fr, pct=t / tot * 100 if tot else 0,
+                         s=s, e=e, P=pr, F=fv))
+    return rows, tot
+
+
+def build(people, start0, mode):
+    rows, tot = compute(people, start0, mode)
+    order = "PF" if mode == "start" else "FP"
+    H = {"P": ["ابتدای وثیقه", "انتهای وثیقه", "تعداد وثیقه"], "F": ["ابتدای آزاد", "انتهای آزاد", "تعداد آزاد"]}
+    heads = ["سهامدار", "تعداد سهام", "تعداد سهام وثیقه", "تعداد سهام آزاد", "%", "ابتدای سهام", "انتهای سهام"]
+    for k in order:
+        heads += H[k]
+    body = []
+    for r in rows:
+        line = [r["name"], fmt(r["total"]), fmt(r["pl"]), fmt(r["fr"]), pct_s(r["pct"]), fmt(r["s"]), fmt(r["e"])]
+        for k in order:
+            rg = r[k]
+            line += [fmt(rg[0]) if rg else "—", fmt(rg[1]) if rg else "—", fmt(r["pl"] if k == "P" else r["fr"])]
+        body.append(line)
+    spl, sfr = sum(r["pl"] for r in rows), sum(r["fr"] for r in rows)
+    total = ["جمع", fmt(tot), fmt(spl), fmt(sfr), "100" if tot else "0", "—", "—"]
+    for k in order:
+        total += ["—", "—", fmt(spl if k == "P" else sfr)]
+    return heads, body, total
+
+
+def write_xlsx(path, people, start0, modes):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    wb = Workbook()
+    wb.remove(wb.active)
+    side = Side(style="thin")
+    box = Border(left=side, right=side, top=side, bottom=side)
+    gray = PatternFill("solid", fgColor="DDDDDD")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    names = {"start": "وثیقه در ابتدا", "end": "وثیقه در انتها"}
+    for m in modes:
+        ws = wb.create_sheet(names[m])
+        ws.sheet_view.rightToLeft = True
+        heads, rows, total = build(people, start0, m)
+        for ri, line in enumerate([heads] + rows + [total], 1):
+            for ci, x in enumerate(line, 1):
+                if ci > 1 and re.fullmatch(r"[\d,]+", x):
+                    v, nf = int(x.replace(",", "")), "#,##0"
+                elif ci > 1 and re.fullmatch(r"\d+/\d+", x):
+                    v, nf = float(x.replace("/", ".")), "0.00000"
+                else:
+                    v, nf = x, "General"
+                c = ws.cell(row=ri, column=ci, value=v)
+                c.number_format, c.alignment, c.border = nf, center, box
+                if ri == 1 or ri == len(rows) + 2:
+                    c.font = Font(bold=True)
+                    c.fill = gray
+        for ci in range(1, 14):
+            ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = 22 if ci == 1 else 15
+        ws.freeze_panes = "B2"
+    wb.save(path)
+
+
+class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("برنامه محاسبه سهامداری")
-        self.geometry("1150x650")
-        self.db = {"company": "", "nominal": 1000, "people": []}
+        self.geometry("1350x640")
+        self.db = {"company": "", "start0": 1, "mode": "start", "people": []}
         if os.path.exists(DATA):
             try:
                 self.db.update(json.load(open(DATA, encoding="utf-8")))
             except Exception:
                 pass
         self.edit_idx = None
-        self.build()
+        self.build_ui()
         self.refresh()
 
-    # ---------- UI ----------
-    def build(self):
-        top = ttk.LabelFrame(self, text="مشخصات شرکت")
+    def build_ui(self):
+        top = ttk.LabelFrame(self, text="تنظیمات")
         top.pack(fill="x", padx=8, pady=4)
         self.company = tk.StringVar(value=self.db["company"])
-        self.nominal = tk.StringVar(value=str(self.db["nominal"]))
+        self.start0 = tk.StringVar(value=str(self.db["start0"]))
         ttk.Label(top, text="نام شرکت:").pack(side="right", padx=4)
-        ttk.Entry(top, textvariable=self.company, width=35, justify="right").pack(side="right")
-        ttk.Label(top, text="ارزش اسمی هر سهم (ریال):").pack(side="right", padx=8)
-        ttk.Entry(top, textvariable=self.nominal, width=12, justify="right").pack(side="right")
+        ttk.Entry(top, textvariable=self.company, width=30, justify="right").pack(side="right")
+        ttk.Label(top, text="سریال شروع:").pack(side="right", padx=8)
+        ttk.Entry(top, textvariable=self.start0, width=10, justify="right").pack(side="right")
+        ttk.Label(top, text="جایگاه وثیقه:").pack(side="right", padx=8)
+        self.modebox = ttk.Combobox(top, values=MODE_TXT, state="readonly", width=30, justify="right")
+        self.modebox.current(MODES.index(self.db["mode"]))
+        self.modebox.pack(side="right")
         ttk.Button(top, text="اعمال", command=self.refresh).pack(side="right", padx=8)
 
-        form = ttk.LabelFrame(self, text="ثبت / ویرایش سهامدار")
+        form = ttk.LabelFrame(self, text="ورود اطلاعات اولیه (بقیه خودکار محاسبه می‌شود)")
         form.pack(fill="x", padx=8, pady=4)
-        self.vars = {}
-        for i, (k, label) in enumerate(self.FIELDS):
-            v = tk.StringVar()
-            self.vars[k] = v
-            r, c = divmod(i, 4)
-            ttk.Label(form, text=label).grid(row=r * 2, column=3 - c, sticky="e", padx=6)
-            ttk.Entry(form, textvariable=v, justify="right", width=24).grid(
-                row=r * 2 + 1, column=3 - c, padx=6, pady=2)
-        bt = ttk.Frame(form)
-        bt.grid(row=4, column=0, columnspan=4, pady=6)
-        for t, cmd in [("ذخیره", self.save), ("جدید / پاک کردن فرم", self.clear),
-                       ("حذف انتخاب‌شده", self.delete), ("چاپ", self.print_report),
-                       ("خروجی Excel (CSV)", self.export)]:
-            ttk.Button(bt, text=t, command=cmd).pack(side="right", padx=4)
+        self.vars = {k: tk.StringVar() for k in ("name", "total", "pledged")}
+        for k, label in (("pledged", "تعداد سهام وثیقه"), ("total", "تعداد سهام"), ("name", "نام سهامدار")):
+            ttk.Label(form, text=label).pack(side="right", padx=6)
+            ttk.Entry(form, textvariable=self.vars[k], justify="right", width=22).pack(side="right")
+        bt = ttk.Frame(self)
+        bt.pack(fill="x", padx=8)
+        for t, cmd in [("ذخیره", self.save), ("جدید", self.clear), ("حذف", self.delete),
+                       ("▲ بالا", lambda: self.move(-1)), ("▼ پایین", lambda: self.move(1)),
+                       ("چاپ", self.print_report), ("خروجی Excel", self.export_xlsx),
+                       ("خروجی CSV", self.export)]:
+            ttk.Button(bt, text=t, command=cmd).pack(side="right", padx=3, pady=4)
 
-        cols = ("row", "name", "nid", "total", "pledged", "main", "start", "end", "pct", "value", "note")
-        heads = ["ردیف", "نام سهامدار", "کد ملی", "کل سهام", "سهام وثیقه", "سهام اصلی (آزاد)",
-                 "شروع سهم", "پایان سهم", "درصد", "ارزش اسمی (ریال)", "توضیحات"]
-        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=14)
-        for c, h in zip(cols, heads):
-            self.tree.heading(c, text=h)
-            self.tree.column(c, width=60 if c == "row" else 105, anchor="center")
-        self.tree.column("name", width=160)
+        self.tree = ttk.Treeview(self, columns=COLS, show="headings", height=12,
+                                 displaycolumns=COLS[::-1])
+        for c in COLS:
+            self.tree.column(c, width=100, anchor="center")
+        self.tree.column("c0", width=140)
         self.tree.pack(fill="both", expand=True, padx=8, pady=4)
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
-        self.summary = ttk.Label(self, font=("Tahoma", 10, "bold"))
-        self.summary.pack(pady=4)
-
-    # ---------- data ----------
-    def nominal_val(self):
-        try:
-            return num(self.nominal.get())
-        except ValueError:
-            return 0
+        ttk.Label(self, text="ترتیب ردیف‌ها تعیین‌کننده سریال سهام است؛ با ▲ ▼ جابه‌جا کنید.").pack(pady=2)
 
     def clear(self):
         self.edit_idx = None
@@ -93,36 +159,23 @@ class App(tk.Tk):
 
     def on_select(self, _=None):
         sel = self.tree.selection()
-        if not sel:
+        if not sel or sel[0] == "tot":
             return
         self.edit_idx = int(sel[0])
         p = self.db["people"][self.edit_idx]
-        for k, v in self.vars.items():
-            v.set(str(p.get(k, "")))
+        for k in self.vars:
+            self.vars[k].set(str(p[k]))
 
     def save(self):
         try:
-            p = {k: self.vars[k].get().strip() for k in self.vars}
-            for k in ("total", "pledged", "start", "end"):
-                p[k] = num(p[k])
+            p = {"name": self.vars["name"].get().strip(), "total": num(self.vars["total"].get()),
+                 "pledged": num(self.vars["pledged"].get())}
         except ValueError:
             return messagebox.showerror("خطا", "مقادیر عددی نامعتبر است.")
-        if not p["name"]:
-            return messagebox.showerror("خطا", "نام سهامدار را وارد کنید.")
+        if not p["name"] or p["total"] <= 0:
+            return messagebox.showerror("خطا", "نام و تعداد سهام را وارد کنید.")
         if p["pledged"] > p["total"]:
             return messagebox.showerror("خطا", "سهام وثیقه نمی‌تواند از کل سهام بیشتر باشد.")
-        if p["start"] and p["end"]:
-            if p["end"] < p["start"]:
-                return messagebox.showerror("خطا", "پایان سهم کوچک‌تر از شروع است.")
-            for i, o in enumerate(self.db["people"]):
-                if i != self.edit_idx and o["start"] and o["end"] and \
-                        not (p["end"] < o["start"] or p["start"] > o["end"]):
-                    return messagebox.showerror(
-                        "خطا", f"بازه سریال با «{o['name']}» همپوشانی دارد.")
-            if p["end"] - p["start"] + 1 != p["total"]:
-                if not messagebox.askyesno(
-                        "هشدار", f"تعداد سهام بازه ({p['end']-p['start']+1}) با کل سهام ({p['total']}) برابر نیست. ادامه می‌دهید؟"):
-                    return
         if self.edit_idx is None:
             self.db["people"].append(p)
         else:
@@ -138,66 +191,79 @@ class App(tk.Tk):
             self.clear()
             self.refresh()
 
-    def rows(self):
-        ppl = self.db["people"]
-        tot = sum(p["total"] for p in ppl)
-        nv = self.nominal_val()
-        out = []
-        for i, p in enumerate(ppl, 1):
-            main = p["total"] - p["pledged"]
-            pct = p["total"] / tot * 100 if tot else 0
-            out.append([i, p["name"], p["nid"], p["total"], p["pledged"], main,
-                        p["start"] or "", p["end"] or "", f"{pct:.2f}", p["total"] * nv, p["note"]])
-        return out, tot, nv
+    def move(self, d):
+        i, n = self.edit_idx, len(self.db["people"])
+        if i is None or not 0 <= i + d < n:
+            return
+        L = self.db["people"]
+        L[i], L[i + d] = L[i + d], L[i]
+        self.refresh()
+        self.tree.selection_set(str(i + d))
 
-    def refresh(self):
+    def cur_mode(self):
+        m = self.db["mode"]
+        return "start" if m == "both" else m
+
+    def refresh(self, *_):
+        try:
+            self.db["start0"] = max(1, num(self.start0.get()))
+        except ValueError:
+            self.db["start0"] = 1
         self.db["company"] = self.company.get()
-        self.db["nominal"] = self.nominal_val()
-        rows, tot, nv = self.rows()
+        self.db["mode"] = MODES[self.modebox.current()]
+        heads, rows, total = build(self.db["people"], self.db["start0"], self.cur_mode())
+        for c, h in zip(COLS, heads):
+            self.tree.heading(c, text=h)
         self.tree.delete(*self.tree.get_children())
         for i, r in enumerate(rows):
-            vals = [fmt(x) if isinstance(x, int) and j in (3, 4, 5, 9) else x
-                    for j, x in enumerate(r)]
-            self.tree.insert("", "end", iid=str(i), values=vals)
-        pl = sum(p["pledged"] for p in self.db["people"])
-        self.summary.config(
-            text=f"تعداد سهامداران: {len(rows)}   |   کل سهام: {fmt(tot)}   |   "
-                 f"سهام وثیقه: {fmt(pl)}   |   سهام اصلی (آزاد): {fmt(tot-pl)}   |   "
-                 f"سرمایه: {fmt(tot*nv)} ریال")
+            self.tree.insert("", "end", iid=str(i), values=r)
+        self.tree.insert("", "end", iid="tot", values=total, tags=("t",))
+        self.tree.tag_configure("t", background="#e6e6e6")
         json.dump(self.db, open(DATA, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
-    # ---------- output ----------
     def export(self):
         f = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
         if not f:
             return
-        rows, _, _ = self.rows()
+        heads, rows, total = build(self.db["people"], self.db["start0"], self.cur_mode())
         with open(f, "w", newline="", encoding="utf-8-sig") as fh:
             w = csv.writer(fh)
-            w.writerow(["ردیف", "نام", "کد ملی", "کل سهام", "وثیقه", "سهام اصلی",
-                        "شروع", "پایان", "درصد", "ارزش اسمی", "توضیحات"])
-            w.writerows(rows)
+            w.writerow(heads)
+            w.writerows(rows + [total])
+
+    def export_xlsx(self):
+        try:
+            import openpyxl  # noqa: F401
+        except ImportError:
+            return messagebox.showerror("خطا", "کتابخانه openpyxl نصب نیست.\nدستور: pip install openpyxl")
+        f = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
+        if not f:
+            return
+        modes = ["start", "end"] if self.db["mode"] == "both" else [self.db["mode"]]
+        try:
+            write_xlsx(f, self.db["people"], self.db["start0"], modes)
+        except PermissionError:
+            return messagebox.showerror("خطا", "فایل باز است یا امکان نوشتن ندارد. آن را ببندید و دوباره تلاش کنید.")
+        if messagebox.askyesno("انجام شد", "فایل ذخیره شد. باز شود؟"):
+            os.startfile(f) if hasattr(os, "startfile") else webbrowser.open("file:///" + f)
 
     def print_report(self):
-        rows, tot, nv = self.rows()
-        pl = sum(p["pledged"] for p in self.db["people"])
         e = html.escape
-        head = ["ردیف", "نام سهامدار", "کد ملی", "کل سهام", "سهام وثیقه", "سهام اصلی (آزاد)",
-                "شروع سهم", "پایان سهم", "درصد", "ارزش اسمی (ریال)", "توضیحات"]
-        body = "".join(
-            "<tr>" + "".join(
-                f"<td>{e(fmt(x) if isinstance(x, int) and j in (3,4,5,9) else str(x))}</td>"
-                for j, x in enumerate(r)) + "</tr>" for r in rows)
-        foot = (f"<tr class=t><td colspan=3>جمع</td><td>{fmt(tot)}</td><td>{fmt(pl)}</td>"
-                f"<td>{fmt(tot-pl)}</td><td></td><td></td><td>100.00</td><td>{fmt(tot*nv)}</td><td></td></tr>")
+        modes = ["start", "end"] if self.db["mode"] == "both" else [self.db["mode"]]
+        parts = []
+        for m in modes:
+            heads, rows, total = build(self.db["people"], self.db["start0"], m)
+            tr = lambda r, tag="td", cls="": f"<tr{cls}>" + "".join(f"<{tag}>{e(x)}</{tag}>" for x in r) + "</tr>"
+            parts.append(f"<div class=pg><h3>{TITLES[m]}</h3><table>{tr(heads, 'th')}"
+                         + "".join(tr(r) for r in rows) + tr(total, "td", " class=t") + "</table></div>")
         doc = f"""<!DOCTYPE html><html dir="rtl" lang="fa"><meta charset="utf-8">
-<style>body{{font-family:Tahoma,sans-serif;margin:20px}}h2,p{{text-align:center}}
-table{{width:100%;border-collapse:collapse;font-size:12px}}
+<style>body{{font-family:Tahoma,sans-serif;margin:15px}}h2,h3,p{{text-align:center}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}
 td,th{{border:1px solid #444;padding:5px;text-align:center}}th{{background:#ddd}}
-.t{{font-weight:bold;background:#eee}}@page{{size:A4 landscape;margin:10mm}}</style>
-<h2>{e(self.company.get() or 'گزارش سهامداری')} - فهرست سهامداران</h2>
-<p>تاریخ چاپ: {datetime.date.today()} &nbsp; | &nbsp; ارزش اسمی هر سهم: {fmt(nv)} ریال</p>
-<table><tr>{''.join(f'<th>{h}</th>' for h in head)}</tr>{body}{foot}</table>
+.t{{font-weight:bold;background:#eee}}.pg{{page-break-after:always}}.pg:last-child{{page-break-after:auto}}
+@page{{size:A4 landscape;margin:10mm}}</style>
+<h2>{e(self.company.get() or 'گزارش سهامداری')}</h2>
+<p>تاریخ چاپ: {datetime.date.today()}</p>{''.join(parts)}
 <script>window.onload=()=>window.print()</script></html>"""
         f = os.path.join(tempfile.gettempdir(), "shareholders_report.html")
         open(f, "w", encoding="utf-8").write(doc)
