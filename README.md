@@ -28,7 +28,17 @@ build.bat
 ```
 خروجی در `dist\Shareholders.exe` ساخته می‌شود و روی ویندوزِ بدون Python هم اجرا می‌شود.
 
-ساخت خودکار با GitHub Actions: workflow در `.github/workflows/build.yml` با ساخت تگ مثل `v1.0.0` یا اجرای دستی، فایل exe را به‌صورت artifact تولید می‌کند.
+### انتشار خودکار نسخه (Release)
+workflow در `.github/workflows/build.yml` فایل exe را روی ویندوز می‌سازد، تگ را ایجاد می‌کند و `Shareholders.exe` را به Release پیوست می‌کند. دو راه:
+
+1. **با تگ:**
+   ```
+   git tag v1.2.0
+   git push origin v1.2.0
+   ```
+2. **دستی از GitHub:** تب Actions ← build-release ← Run workflow ← نسخه (مثلاً `v1.2.0`). تگ و Release توسط خود workflow ساخته می‌شود.
+
+نکته: در Settings ← Actions ← General، گزینه Workflow permissions باید روی Read and write باشد (یا سازمان اجازهٔ نوشتن به workflow بدهد).
 
 ## نحوه استفاده
 1. نام شرکت، سریال شروع و جایگاه وثیقه را بالای صفحه تنظیم و «اعمال» را بزنید.

@@ -1,19 +1,50 @@
-name: build-exe
+name: build-release
+
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "نسخه برای تگ و Release (مثال: v1.2.0)"
+        required: true
+        default: "v1.2.0"
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt -r requirements-dev.txt
-      - run: pyinstaller --onefile --windowed --name Shareholders --hidden-import openpyxl shareholders.py
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Build exe
+        run: pyinstaller --onefile --windowed --name Shareholders --hidden-import openpyxl shareholders.py
+
+      - name: Resolve tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") { $t = $env:GITHUB_REF_NAME } else { $t = "${{ inputs.version }}" }
+          "TAG=$t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - uses: actions/upload-artifact@v4
         with:
           name: Shareholders-exe
           path: dist/Shareholders.exe
+
+      - name: Create tag and GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: برنامه محاسبه سهامداری ${{ env.TAG }}
+          generate_release_notes: true
+          files: dist/Shareholders.exe
